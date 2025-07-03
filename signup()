@@ -1,0 +1,13 @@
+@app.post("/signup")
+def signup(user: UserCreate):
+    if user.email in users_db:
+        raise HTTPException(status_code=400, detail="User already exists")
+    hashed_pw = get_password_hash(user.password)
+    users_db[user.email] = UserInDB(
+        email=user.email,
+        hashed_password=hashed_pw,
+        role=user.role,
+        is_verified=False
+    )
+    verification_token = fernet.encrypt(user.email.encode()).decode()
+    return {"message": "Verify your email", "verification_url": f"/verify-email?token={verification_token}"}
