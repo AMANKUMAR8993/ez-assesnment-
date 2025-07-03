@@ -1,0 +1,141 @@
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import FileResponse
+from jose import JWTError, jwt
+from pydantic import BaseModel, EmailStr
+from typing import List
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+import shutil, os
+import secrets
+from cryptography.fernet import Fernet
+
+app = FastAPI()
+
+
+users_db = {}
+files_db = {}
+
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+SECRET_KEY = "supersecretkey"
+FERNET_KEY = Fernet.generate_key()
+fernet = Fernet(FERNET_KEY)
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+class User(BaseModel):
+    email: EmailStr
+    password: str
+    role: str
+    is_verified: bool = False
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class FileMeta(BaseModel):
+    id: str
+    filename: str
+    path: str
+
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None or email not in users_db:
+            raise HTTPException(status_code=401, detail="Invalid auth")
+        return users_db[email]
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+@app.post("/signup")
+def signup(user: User):
+    if user.email in users_db:
+        raise HTTPException(status_code=400, detail="User already exists")
+    user.password = get_password_hash(user.password)
+    users_db[user.email] = user
+    verification_token = fernet.encrypt(user.email.encode()).decode()
+    return {"message": "Verify your email", "verification_url": f"/verify-email?token={verification_token}"}
+
+@app.get("/verify-email")
+def verify_email(token: str):
+    try:
+        email = fernet.decrypt(token.encode()).decode()
+        users_db[email].is_verified = True
+        return {"message": "Email verified successfully"}
+    except:
+        raise HTTPException(status_code=400, detail="Invalid verification link")
+
+@app.post("/token", response_model=Token)
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = users_db.get(form_data.username)
+    if not user or not verify_password(form_data.password, user.password):
+        raise HTTPException(status_code=400, detail="Incorrect credentials")
+    if not user.is_verified:
+        raise HTTPException(status_code=403, detail="Email not verified")
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/upload-file")
+def upload_file(file: UploadFile = File(...), user: User = Depends(get_current_user)):
+    if user.role != "ops":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not file.filename.endswith((".pptx", ".docx", ".xlsx")):
+        raise HTTPException(status_code=400, detail="Invalid file type")
+    file_id = secrets.token_hex(8)
+    path = os.path.join(UPLOAD_FOLDER, file_id + "_" + file.filename)
+    with open(path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    files_db[file_id] = {"filename": file.filename, "path": path, "uploaded_by": user.email}
+    return {"file_id": file_id, "message": "File uploaded"}
+
+@app.get("/files")
+def list_files(user: User = Depends(get_current_user)):
+    if user.role != "client":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return [{"file_id": k, "filename": v["filename"]} for k, v in files_db.items()]
+
+@app.get("/download-file/{file_id}")
+def get_download_link(file_id: str, user: User = Depends(get_current_user)):
+    if user.role != "client":
+        raise HTTPException(status_code=403, detail="Only client can download")
+    if file_id not in files_db:
+        raise HTTPException(status_code=404, detail="File not found")
+    encrypted_token = fernet.encrypt(file_id.encode()).decode()
+    return {"download-link": f"/download-access/{encrypted_token}", "message": "success"}
+
+@app.get("/download-access/{token}")
+def download_file(token: str, user: User = Depends(get_current_user)):
+    if user.role != "client":
+        raise HTTPException(status_code=403, detail="Only client can access files")
+    try:
+        file_id = fernet.decrypt(token.encode()).decode()
+        file = files_db.get(file_id)
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        return FileResponse(file["path"], filename=file["filename"])
+    except:
+        raise HTTPException(status_code=400, detail="Invalid or expired token") make this code effective and better
