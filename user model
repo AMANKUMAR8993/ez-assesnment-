@@ -1,0 +1,10 @@
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    role: str
+
+class UserInDB(BaseModel):
+    email: EmailStr
+    hashed_password: str
+    role: str
+    is_verified: bool = False
